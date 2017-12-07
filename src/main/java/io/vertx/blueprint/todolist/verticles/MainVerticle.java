@@ -15,9 +15,8 @@ import io.vertx.ext.web.handler.CorsHandler;
 import io.vertx.redis.RedisClient;
 import io.vertx.redis.RedisOptions;
 
-import java.util.HashSet;
-import java.util.Objects;
-import java.util.Set;
+import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  *
@@ -64,6 +63,56 @@ public class MainVerticle extends AbstractVerticle {
      * @param routingContext
      */
     private void handlerUpdateTodo(RoutingContext routingContext) {
+        String todoId=routingContext.request().getParam("todoId");
+        Todo newTodo=new Todo(routingContext.getBodyAsJson());
+        if(Objects.isNull(todoId)){
+            sendError(400,routingContext.response());
+        }else{
+            Future future=this.getCertain(todoId).compose(old->{
+                if(old.isPresent()){
+                    Todo fnTodo=old.get().merge(newTodo);
+                     return this.insert(fnTodo).map(r->r?fnTodo:null);
+
+                }else{
+                    return Future.succeededFuture();
+                }
+            });
+           future.setHandler(r->{
+               if(Objects.isNull(r)){
+                   sendError(500,routingContext.response());
+               }else{
+                   routingContext.response().setStatusCode(200).putHeader("content-type","application/json")
+                       .end(Json.encodePrettily(newTodo));
+               }
+           });
+        }
+    }
+
+    public Future<Optional<Todo>> getCertain(String todoID) {
+        Future<Optional<Todo>> result = Future.future();
+        redis.hget(RedisKey.REDIS_TODO_KEY, todoID, res -> {
+            if (res.succeeded()) {
+                result.complete(Optional.ofNullable(
+                    res.result() == null ? null : new Todo(res.result())));
+            } else {
+                result.fail(res.cause());
+            }
+        });
+        return result;
+    }
+    public Future<Boolean> insert(Todo todo) {
+        Future<Boolean> result = Future.future();
+        final String encoded = Json.encodePrettily(todo);
+        redis.hset(RedisKey.REDIS_TODO_KEY, String.valueOf(todo.getId()),
+            encoded, res -> {
+                if (res.succeeded()) {
+                    result.complete(true);
+                }
+                else {
+                    result.fail(res.cause());
+                }
+            });
+        return result;
     }
 
     /**
@@ -71,7 +120,20 @@ public class MainVerticle extends AbstractVerticle {
      * @param routingContext
      */
     private void handlerListTodo(RoutingContext routingContext) {
+        redis.hvals(RedisKey.REDIS_TODO_KEY,r->{
+           if(r.succeeded()){
+               List<Todo> todoList=r.result().stream().map(x->new Todo((String) x))
+                   .collect(Collectors.toList());
+
+               routingContext.response()
+                   .putHeader("content-type","application/json")
+                   .end(Json.encodePrettily(todoList));
+           }else{
+               sendError(500,routingContext.response());
+           }
+        });
     }
+
 
     /**
      * 获得待办事项
@@ -108,6 +170,14 @@ public class MainVerticle extends AbstractVerticle {
      * @param routingContext
      */
     private void handlerDeleteAll(RoutingContext routingContext) {
+        redis.del(RedisKey.REDIS_TODO_KEY,r->{
+            if(r.succeeded()){
+                routingContext.response().putHeader("content-type","application/json")
+                    .end("删除成功");
+            }else{
+                sendError(500,routingContext.response());
+            }
+        });
     }
 
     /**
