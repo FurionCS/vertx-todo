@@ -1,8 +1,9 @@
 package io.vertx.blueprint.todolist.verticles;
 
 import io.vertx.blueprint.todolist.constants.Constants;
-import io.vertx.blueprint.todolist.constants.RedisKey;
 import io.vertx.blueprint.todolist.entity.Todo;
+import io.vertx.blueprint.todolist.service.TodoService;
+import io.vertx.blueprint.todolist.service.impl.TodoServiceImpl;
 import io.vertx.core.AbstractVerticle;
 import io.vertx.core.Future;
 import io.vertx.core.http.HttpMethod;
@@ -12,11 +13,11 @@ import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import io.vertx.ext.web.handler.CorsHandler;
-import io.vertx.redis.RedisClient;
 import io.vertx.redis.RedisOptions;
 
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  *
@@ -30,7 +31,7 @@ public class MainVerticle extends AbstractVerticle {
     private static final int HTTP_PORT=8889;
     private static final int REDIS_PORT=6379;
 
-    private RedisClient redis;
+    private TodoService todoService;
 
     @Override
     public void start(Future<Void> future) throws Exception {
@@ -68,70 +69,34 @@ public class MainVerticle extends AbstractVerticle {
         if(Objects.isNull(todoId)){
             sendError(400,routingContext.response());
         }else{
-            Future future=this.getCertain(todoId).compose(old->{
-                if(old.isPresent()){
-                    Todo fnTodo=old.get().merge(newTodo);
-                     return this.insert(fnTodo).map(r->r?fnTodo:null);
-
-                }else{
-                    return Future.succeededFuture();
-                }
-            });
-           future.setHandler(r->{
-               if(Objects.isNull(r)){
-                   sendError(500,routingContext.response());
+           todoService.update(todoId,newTodo).setHandler(r->{
+               if(r.result()!=null){
+                   routingContext.response().putHeader("content-type","application/json")
+                       .end(Json.encodePrettily(r.result()));
                }else{
-                   routingContext.response().setStatusCode(200).putHeader("content-type","application/json")
-                       .end(Json.encodePrettily(newTodo));
+                   sendError(500,routingContext.response());
                }
            });
         }
     }
 
-    public Future<Optional<Todo>> getCertain(String todoID) {
-        Future<Optional<Todo>> result = Future.future();
-        redis.hget(RedisKey.REDIS_TODO_KEY, todoID, res -> {
-            if (res.succeeded()) {
-                result.complete(Optional.ofNullable(
-                    res.result() == null ? null : new Todo(res.result())));
-            } else {
-                result.fail(res.cause());
-            }
-        });
-        return result;
-    }
-    public Future<Boolean> insert(Todo todo) {
-        Future<Boolean> result = Future.future();
-        final String encoded = Json.encodePrettily(todo);
-        redis.hset(RedisKey.REDIS_TODO_KEY, String.valueOf(todo.getId()),
-            encoded, res -> {
-                if (res.succeeded()) {
-                    result.complete(true);
-                }
-                else {
-                    result.fail(res.cause());
-                }
-            });
-        return result;
-    }
+
 
     /**
      * 获得待办事项列表
      * @param routingContext
      */
     private void handlerListTodo(RoutingContext routingContext) {
-        redis.hvals(RedisKey.REDIS_TODO_KEY,r->{
-           if(r.succeeded()){
-               List<Todo> todoList=r.result().stream().map(x->new Todo((String) x))
-                   .collect(Collectors.toList());
-
+       todoService.getAll().setHandler(r->{
+           if(r.result()!=null && r.result().size()>0){
+               final String result=Json.encodePrettily(r.result());
                routingContext.response()
                    .putHeader("content-type","application/json")
-                   .end(Json.encodePrettily(todoList));
+                   .end(result);
            }else{
-               sendError(500,routingContext.response());
+               sendError(404,routingContext.response());
            }
-        });
+       });
     }
 
 
@@ -144,22 +109,17 @@ public class MainVerticle extends AbstractVerticle {
         if(Objects.isNull(todoId)){
             sendError(400,routingContext.response());
         }else{
-            redis.hget(RedisKey.REDIS_TODO_KEY,todoId,x->{
-                if(x.succeeded()){
-                    String result=x.result();
-                    System.out.println(result);
-                    if(Objects.isNull(result)){
-                        sendError(404,routingContext.response());
-                    }else{
-                        routingContext.response()
-                            .setStatusCode(200)
+            todoService.getCertain(todoId).setHandler(r->{
+                    if(r.result().isPresent()){
+                        String result=Json.encodePrettily(r.result().get());
+                        routingContext.response().setStatusCode(200)
                             .putHeader("content-type","application/json")
                             .end(result);
+                    }else{
+                        sendError(404,routingContext.response());
                     }
-                }else{
-                    sendError(503,routingContext.response());
                 }
-            });
+            );
         }
     }
 
@@ -170,12 +130,12 @@ public class MainVerticle extends AbstractVerticle {
      * @param routingContext
      */
     private void handlerDeleteAll(RoutingContext routingContext) {
-        redis.del(RedisKey.REDIS_TODO_KEY,r->{
-            if(r.succeeded()){
-                routingContext.response().putHeader("content-type","application/json")
-                    .end("删除成功");
+        todoService.deleteAll().setHandler(r->{
+            if(r.result()){
+                routingContext.response().setStatusCode(204).putHeader("content-type","application/json")
+                    .end("delete success");
             }else{
-                sendError(500,routingContext.response());
+                sendError(404,routingContext.response());
             }
         });
     }
@@ -190,15 +150,15 @@ public class MainVerticle extends AbstractVerticle {
             sendError(400,routingContext.response());
             return;
         }else{
-            redis.hdel(RedisKey.REDIS_TODO_KEY,todoId,r->{
-                if(r.succeeded()){
-                    routingContext.response().end("删除成功");
+            todoService.delete(todoId).setHandler(r->{
+                if(r.result()){
+                    routingContext.response().setStatusCode(204).putHeader("content-type","application/json")
+                        .end("delete success");
                 }else{
                     sendError(404,routingContext.response());
                 }
             });
         }
-
     }
 
     /**
@@ -207,13 +167,12 @@ public class MainVerticle extends AbstractVerticle {
      */
     private void handleAddTodo(RoutingContext routingContext) {
            Todo todo= wrapObject(new Todo(routingContext.getBodyAsJson()),routingContext);
-           redis.hset(RedisKey.REDIS_TODO_KEY,String.valueOf(todo.getId()),todo.toJson().toString(),r->{
-               if(r.succeeded()) {
-                   routingContext.response()
-                       .setStatusCode(200)
+           todoService.insert(todo).setHandler(r->{
+               if(r.result()){
+                   routingContext.response().setStatusCode(200)
                        .putHeader("content-type","application/json")
                        .end(Json.encodePrettily(todo));
-               }else {
+               }else{
                    sendError(500,routingContext.response());
                }
            });
@@ -264,7 +223,7 @@ public class MainVerticle extends AbstractVerticle {
         /**
          * 创建redis连接对象
          */
-        this.redis=RedisClient.create(vertx,config);
+        this.todoService=new TodoServiceImpl(vertx,config);
     }
 
     /**
